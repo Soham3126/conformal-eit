@@ -1,0 +1,19 @@
+# Third-party library: download EIDORS 3.11 separately (see README)
+lib/
+
+# Cached operators, simulated datasets and downloaded KTC2023 data (regenerated / downloaded)
+conformal_eit/data/
+
+# Manuscript (kept private until submission)
+paper/
+
+# Quick-run outputs
+conformal_eit/results_quick/
+
+# MATLAB / OS clutter
+*.asv
+*.m~
+*.mexw64
+slprj/
+.DS_Store
+Thumbs.db
