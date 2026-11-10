@@ -65,8 +65,9 @@ writetable(T2, fullfile(res_dir, 'exp2_intervals.csv'));
 % ---- figure: Bayes credible vs adaptive CRC for each estimate, alpha = 0.10 ----
 a0 = cfg.alpha(min(2, numel(cfg.alpha)));
 f = figure('Color', 'w', 'Position', [100 100 1350 380]);
-sel_rows = {{'Bayes', 'Bayes credible'}, {'BAE', 'BAE credible'}, {'Bayes', 'CRC grp adaptive'}, ...
-    {'BAE', 'CRC grp adaptive'}, {'GREIT', 'CRC grp adaptive'}, {'TV', 'CRC grp adaptive'}};
+sel_rows = {{'Bayes', 'Bayes credible', 'Bayes credible'}, {'BAE', 'BAE credible', 'BAE credible'}, ...
+    {'Bayes', 'CRC grp adaptive', 'Bayes + conformal'}, {'BAE', 'CRC grp adaptive', 'BAE + conformal'}, ...
+    {'GREIT', 'CRC grp adaptive', 'GREIT + conformal'}, {'TV', 'CRC grp adaptive', 'TV + conformal'}};   % {estimate, method, legend name}
 cols = {'miscov_active', 'width_active', 'miscov_true_anomaly'};
 ylab = {'miscoverage, active pixels', 'interval width, active pixels', 'miscoverage, true anomaly (not guaranteed)'};
 for p = 1:3
@@ -76,7 +77,7 @@ for p = 1:3
             & abs(T2.alpha - a0) < 1e-9;
         if ~any(sel), continue; end
         plot(T2.level(sel), T2.(cols{p})(sel), '-o', 'LineWidth', 1.4, ...
-            'DisplayName', [sel_rows{r}{1} ' ' sel_rows{r}{2}]);
+            'DisplayName', sel_rows{r}{3});
     end
     if p == 1, plot(xlim, [a0 a0], 'k--', 'DisplayName', 'target \alpha'); end
     xlabel('model-error level'); xticks(unique(T2.level)); ylabel(ylab{p});

@@ -4,8 +4,9 @@ lib/
 # Cached operators, simulated datasets and downloaded KTC2023 data (regenerated / downloaded)
 conformal_eit/data/
 
-# Manuscript (kept private until submission)
+# Manuscript and documents (kept private until submission)
 paper/
+Pdf docs/
 
 # Quick-run outputs
 conformal_eit/results_quick/
@@ -17,3 +18,7 @@ conformal_eit/results_quick/
 slprj/
 .DS_Store
 Thumbs.db
+
+# Python clutter
+__pycache__/
+*.pyc
