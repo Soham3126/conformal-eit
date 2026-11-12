@@ -15,6 +15,7 @@ pip install -r requirements.txt
 | `run_seg_metrics.py` | Scores the GREIT 25% rule and the conformal inner / outer sets with Dice, IoU, sensitivity, specificity, precision, accuracy, balanced accuracy, MCC, SSIM, boundary F1, HD95, ASSD and area ratio (about 2 min) | `exp5_seg_metrics.csv`, `exp5_seg_metrics_table.tex` |
 | `make_fig_model_error.py` | Pixel error bars versus model-error level, from `exp2_intervals.csv` | `exp2_model_error.png` |
 | `make_fig_ktc.py` | Real KTC2023 phantoms: truth, GREIT image, conformal sets (leave-one-out) | `fig_ktc_examples.png` |
+| `run_comparison.py` | Compares the conformal sets with the GREIT 25% rule, Otsu thresholding and a Dice-tuned threshold, and collects the Bayesian / BAE error-bar results from `exp2_intervals.csv` (about 10 s) | `exp6_comparison_regions.csv`, `exp6_comparison_errorbars.csv`, `exp6_comparison_tables.tex` |
 | `seg_metrics.py` | Metric definitions used by `run_seg_metrics.py` | |
 
 All scripts accept `--root C:/path/to/EIT_Hybrid_Project` if the folder is moved, and `--alpha`.

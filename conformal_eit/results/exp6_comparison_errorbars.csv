@@ -1,0 +1,13 @@
+level,method,miscov_all,miscov_active,miscov_background,width_active
+0,Bayesian credible intervals,0.065108,0.765516,0.017573,0.172443
+0,Bayesian approximation error,0.044046,0.193399,0.018122,0.633754
+0,Conformal (GREIT),0.090390,0.090935,0.091192,0.861208
+1,Bayesian credible intervals,0.064649,0.715021,0.016724,0.172941
+1,Bayesian approximation error,0.041238,0.209827,0.013536,0.636919
+1,Conformal (GREIT),0.090739,0.091264,0.091376,0.885456
+2,Bayesian credible intervals,0.548085,0.912056,0.400601,0.174340
+2,Bayesian approximation error,0.355520,0.726670,0.207015,0.616883
+2,Conformal (GREIT),0.090641,0.090923,0.091379,0.865886
+3,Bayesian credible intervals,0.496401,0.880627,0.344200,0.174432
+3,Bayesian approximation error,0.308790,0.670931,0.165205,0.618223
+3,Conformal (GREIT),0.089931,0.091399,0.090791,0.905683

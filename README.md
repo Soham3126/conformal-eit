@@ -54,6 +54,7 @@ Python from the files cached by the MATLAB run (so run MATLAB first):
 cd conformal_eit/python_metrics
 pip install -r requirements.txt
 python run_seg_metrics.py        # Table 4, about 2 min
+python run_comparison.py         # Table 5, about 10 s
 python make_fig_model_error.py   # Figure 3
 python make_fig_ktc.py           # Figure 4 (needs the KTC2023 data)
 ```
@@ -70,7 +71,7 @@ python make_fig_ktc.py           # Figure 4 (needs the KTC2023 data)
 | `conformal_eit/sim/` | 3D simulation models with model-error levels 0–3, phantoms |
 | `conformal_eit/real/` | KTC2023 loader, models, ground-truth registration |
 | `conformal_eit/experiments/` | Experiments 1–4, settings (`cfg_default.m`), plots |
-| `conformal_eit/python_metrics/` | Python: standard segmentation metrics (Dice, IoU, SSIM, ...) and figure scripts |
+| `conformal_eit/python_metrics/` | Python: segmentation metrics, comparison with established methods, figure scripts |
 | `conformal_eit/results/` | tables and figures from the paper run |
 
 | Paper | Output |
@@ -81,6 +82,7 @@ python make_fig_ktc.py           # Figure 4 (needs the KTC2023 data)
 | Figure 4 | `results/fig_ktc_examples.png` (`python_metrics/make_fig_ktc.py`); the paper version adds a row of photographs of the targets from the KTC2023 paper, which are not redistributed here |
 | Tables 1–3 | `results/exp1_segmentation.csv`, `exp2_intervals.csv`, `exp3_ktc_real.csv` |
 | Table 4 | `results/exp5_seg_metrics.csv` (`python_metrics/run_seg_metrics.py`) |
+| Table 5 | `results/exp6_comparison_regions.csv` (`python_metrics/run_comparison.py`) |
 
 ## Citation
 Citation details will be added on publication.
