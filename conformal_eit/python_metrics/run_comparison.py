@@ -1,162 +1,209 @@
-"""Comparison of the conformal method with four established alternatives.
+"""Comparison of the conformal sets with three established EIT reconstructions.
 
-Regions (simulated levels 0-3 and the real KTC2023 phantoms):
-    GREIT 25% rule        fixed threshold at 25% of the peak (GREIT convention)
-    Otsu                  per-image automatic threshold (Otsu, 1979); no calibration data
-    Dice-tuned threshold  single threshold that maximises mean Dice on the calibration phantoms (no guarantee)
-    Conformal inner/outer conformal risk control, alpha = 0.10
-Error bars (simulated levels 0-3; real tank has no true conductivity values):
-    Bayesian credible intervals, Bayesian approximation error (BAE), conformal around GREIT
-    -> read from results/exp2_intervals.csv produced by main_conformal.m
+Each established method reconstructs an image and is read with the standard
+GREIT 25%-of-peak rule; the conformal inner / outer sets are calibrated on GREIT
+(alpha = 0.10), as in the rest of the paper.
 
-Same data, splits and protocol as run_seg_metrics.py (200 random 50/50 splits for
-simulations, leave-one-out for the 25 real phantoms).
+    Gauss-Newton (one step, NOSER prior)   x = (J'J + a diag(J'J))^-1 J'y      (Cheney et al. 1990)
+    Tikhonov regularisation (identity)      x = (J'J + a I)^-1 J'y              (Tikhonov & Arsenin 1977)
+    Total variation                         argmin 0.5/s^2 ||Jx-y||^2 + mu ||Dx||_1  (Chambolle-Pock solver)
+
+Regularisation weights are tuned with the same rule as the paper's Bayesian and TV
+estimates: lowest mean relative error on a separate tuning set (simulations:
+conf_tune.mat; real tank: the first 60 simulated KTC phantoms in conf_ktc_sim.mat).
+Simulated TV images are the ones cached by main_conformal.m (conf_tv_level<k>.mat).
+
+Real voltages are put into model units with the scale implied by the noise level
+printed by exp3_ktc_real.m (--ktc_sigma, default 0.0152); this matters only for TV.
 
     python run_comparison.py
-Writes results/exp6_comparison_regions.csv, results/exp6_comparison_errorbars.csv
-and results/exp6_comparison_tables.tex
+Writes results/exp6_comparison_regions.csv (Table 5), results/exp6_comparison_metrics.csv
+(extra columns of Table 4) and results/exp6_comparison_tables.tex.
 """
-import argparse, csv, os
+import argparse, os
 import h5py
 import numpy as np
-from skimage.filters import threshold_otsu
-from run_seg_metrics import (CAL_FRAC, I25, LGRID, N_SPLITS, SEED, crc_index, load_ktc, load_ops,
+import scipy.io as sio
+from scipy import sparse
+from run_seg_metrics import (CAL_FRAC, I25, LGRID, N_SPLITS, SEED, Grid, crc_index, load_ktc,
                              rel_score, seg_loss_curves)
+from seg_metrics import METRICS, all_metrics
 
 ALPHA = 0.10
-REGION_METHODS = ["greit25", "otsu", "dice_tuned", "conf_inner", "conf_outer"]
-REGION_LABEL = {"greit25": "GREIT 25\\% rule", "otsu": "Otsu threshold", "dice_tuned": "Dice-tuned threshold",
-                "conf_inner": "Conformal inner set", "conf_outer": "Conformal outer set"}
+RECON = ["gn", "tikhonov", "tv"]
+LABEL = {"gn": "Gauss--Newton (25\\% rule)", "tikhonov": "Tikhonov (25\\% rule)", "tv": "Total variation (25\\% rule)",
+         "conf_inner": "Conformal inner set (GREIT)", "conf_outer": "Conformal outer set (GREIT)"}
 REGION_METRICS = ["spurious", "missed", "area", "dice", "iou", "sensitivity", "precision"]
 
 
-def counts(mask, t):
-    tp = float(np.sum(mask & t)); fp = float(np.sum(mask & ~t)); fn = float(np.sum(~mask & t))
-    return tp, fp, fn
+# ---------- data ----------
+def load_ops_full(path):
+    with h5py.File(path, "r") as f:
+        o = f["ops"]
+        g = o["Dg"]; nrow = int(g.attrs["MATLAB_sparse"]); P = int(o["P"][()].squeeze())
+        Dg = sparse.csc_matrix((g["data"][()], g["ir"][()], g["jc"][()]), shape=(nrow, P))
+        return {"R": o["R"][()].T, "J": o["Jp"][()].T, "C": o["C"][()].T, "dx": float(o["dx"][()].squeeze()),
+                "Dg": Dg.tocsr()}
 
 
+def load_set(path):
+    with h5py.File(path, "r") as f:
+        D = f["D"]
+        return {"Y": D["Y"][()].T, "XT": D["XT"][()].T, "T": D["T"][()].T.astype(bool),
+                "sigma_m": float(D["sigma_m"][()].squeeze())}
+
+
+# ---------- reconstructions ----------
+def linear_operator(J, kind, a):
+    JtJ = J.T @ J
+    Reg = np.diag(np.diag(JtJ)) if kind == "gn" else np.eye(JtJ.shape[0]) * (np.trace(JtJ) / JtJ.shape[0])
+    return np.linalg.solve(JtJ + a * Reg, J.T)
+
+
+def rel_err(X, XT):
+    return float(np.mean(np.linalg.norm(X - XT, axis=0) / np.maximum(np.linalg.norm(XT, axis=0), 1e-300)))
+
+
+def tune_linear(J, kind, Ytune, XTtune, grid=np.logspace(-8, 2, 41)):
+    errs = [rel_err(linear_operator(J, kind, a) @ Ytune, XTtune) for a in grid]
+    k = int(np.argmin(errs))
+    if k in (0, len(grid) - 1):
+        print(f"   warning: {kind} weight at the edge of the grid")
+    return linear_operator(J, kind, grid[k]), grid[k], errs[k]
+
+
+def tv_recon(Y, J, Dg, sigma, mu, maxit=2000, tol=1e-4):
+    """Port of recon/tv_recon.m (diagonally preconditioned Chambolle-Pock), all columns at once."""
+    K = J / sigma; Kt = K.T; Dt = Dg.T.tocsr()
+    absK = np.abs(K); absD = abs(Dg)
+    tau = 1.0 / np.maximum(absK.sum(0) + np.asarray(absD.sum(0)).ravel(), np.finfo(float).eps)
+    s1 = 1.0 / np.maximum(absK.sum(1), np.finfo(float).eps)
+    s2 = 1.0 / np.maximum(np.asarray(absD.sum(1)).ravel(), np.finfo(float).eps)
+    d = Y / sigma; N = Y.shape[1]; P = J.shape[1]
+    x = np.zeros((P, N)); xb = x.copy(); y1 = np.zeros((K.shape[0], N)); y2 = np.zeros((Dg.shape[0], N))
+    active = np.ones(N, bool)
+    for it in range(1, maxit + 1):
+        a = active
+        y1[:, a] = (y1[:, a] + s1[:, None] * (K @ xb[:, a] - d[:, a])) / (1 + s1[:, None])
+        y2[:, a] = np.clip(y2[:, a] + s2[:, None] * (Dg @ xb[:, a]), -mu, mu)
+        xn = x[:, a] - tau[:, None] * (Kt @ y1[:, a] + Dt @ y2[:, a])
+        xb[:, a] = 2 * xn - x[:, a]
+        if it % 50 == 0:
+            conv = np.linalg.norm(xn - x[:, a], axis=0) <= tol * np.maximum(np.linalg.norm(xn, axis=0), np.finfo(float).eps)
+            x[:, a] = xn
+            idx = np.where(a)[0]; active[idx[conv]] = False
+            if not active.any():
+                break
+        else:
+            x[:, a] = xn
+    return x
+
+
+def tune_tv(J, Dg, sigma, Ytune, XTtune, grid=2.0 ** np.arange(-6, 15, 2)):
+    errs = []
+    for mu in grid:
+        errs.append(rel_err(tv_recon(Ytune, J, Dg, sigma, mu), XTtune))
+        print(f"      TV mu = {mu:<8g} relative error {errs[-1]:.3f}")
+    k = int(np.argmin(errs))
+    return grid[k], errs[k]
+
+
+# ---------- scoring ----------
 def region_scores(mask, t):
-    """spurious area / true area (capped at 1, as in the CRC loss), missed fraction, area ratio,
-    Dice, IoU, sensitivity, precision."""
-    tp, fp, fn = counts(mask, t); nt = max(tp + fn, 1.0)
-    return np.array([min(fp / nt, 1.0), fn / nt, (tp + fp) / nt,
-                     2 * tp / max(2 * tp + fp + fn, 1.0), tp / max(tp + fp + fn, 1.0),
-                     tp / nt, tp / (tp + fp) if tp + fp > 0 else np.nan])
+    tp = float(np.sum(mask & t)); fp = float(np.sum(mask & ~t)); fn = float(np.sum(~mask & t)); nt = max(tp + fn, 1.0)
+    return np.array([min(fp / nt, 1.0), fn / nt, (tp + fp) / nt, 2 * tp / max(2 * tp + fp + fn, 1.0),
+                     tp / max(tp + fp + fn, 1.0), tp / nt, tp / (tp + fp) if tp + fp > 0 else np.nan])
 
 
-def dice_curves(S, T):
-    """D[i,k] = Dice of {S[:,i] >= LGRID[k]} against T[:,i]."""
-    N = S.shape[1]; D = np.zeros((N, len(LGRID)))
-    for i in range(N):
-        inside = S[:, i][:, None] >= LGRID[None, :]; t = T[:, i][:, None]
-        tp = (inside & t).sum(0); fp = (inside & ~t).sum(0); fn = (~inside & t).sum(0)
-        D[i] = 2 * tp / np.maximum(2 * tp + fp + fn, 1)
-    return D
-
-
-class Scorer:
-    """Caches region scores per phantom for grid thresholds and for Otsu."""
-
-    def __init__(self, S, T):
-        self.S, self.T, self.grid_cache = S, T, {}
-        self.otsu = np.array([region_scores(S[:, i] >= threshold_otsu(S[:, i]), T[:, i]) for i in range(S.shape[1])])
-
-    def at(self, i, k):
-        if (i, k) not in self.grid_cache:
-            self.grid_cache[(i, k)] = region_scores(self.S[:, i] >= LGRID[k], self.T[:, i])
-        return self.grid_cache[(i, k)]
-
-
-def evaluate(S, T, splits):
-    """splits: list of (cal_idx, test_idx). Returns {method: mean scores} averaged over test
-    phantoms, then over splits."""
-    Lin, Lout = seg_loss_curves(S, T); D = dice_curves(S, T); sc = Scorer(S, T)
-    acc = {m: [] for m in REGION_METHODS}; lam = {m: [] for m in ["dice_tuned", "conf_inner", "conf_outer"]}
+def evaluate(images, Sg, T, grid, splits):
+    """images: {method: P x N reconstruction}; Sg: GREIT relative score for the conformal sets."""
+    out = {}
+    masks = {m: rel_score(X) >= LGRID[I25] for m, X in images.items()}
+    for m, M in masks.items():
+        reg = np.array([region_scores(M[:, i], T[:, i]) for i in range(T.shape[1])])
+        met = np.array([all_metrics(M[:, i], T[:, i], grid) for i in range(T.shape[1])])
+        out[m] = (np.mean([np.nanmean(reg[t], 0) for _, t in splits], 0),
+                  np.mean([np.nanmean(met[t], 0) for _, t in splits], 0), 0.25)
+    Lin, Lout = seg_loss_curves(Sg, T); acc = {"conf_inner": [], "conf_outer": []}; lam = {"conf_inner": [], "conf_outer": []}
     for cal, tst in splits:
-        ki = crc_index(Lin[cal], ALPHA, "nonincreasing"); ko = crc_index(Lout[cal], ALPHA, "nondecreasing")
-        kd = int(np.argmax(D[cal].mean(0)))
-        lam["dice_tuned"].append(LGRID[kd]); lam["conf_inner"].append(LGRID[ki]); lam["conf_outer"].append(LGRID[ko])
-        for m, rows in [("greit25", [sc.at(i, I25) for i in tst]), ("otsu", [sc.otsu[i] for i in tst]),
-                        ("dice_tuned", [sc.at(i, kd) for i in tst]), ("conf_inner", [sc.at(i, ki) for i in tst]),
-                        ("conf_outer", [sc.at(i, ko) for i in tst])]:
-            acc[m].append(np.nanmean(rows, axis=0))
-    out = {m: np.mean(acc[m], axis=0) for m in REGION_METHODS}
-    thr = {"greit25": 0.25, "otsu": float(np.mean([threshold_otsu(S[:, i]) for i in range(S.shape[1])]))}
-    thr.update({m: float(np.mean(v)) for m, v in lam.items()})
-    return out, thr
+        for m, k in (("conf_inner", crc_index(Lin[cal], ALPHA, "nonincreasing")),
+                     ("conf_outer", crc_index(Lout[cal], ALPHA, "nondecreasing"))):
+            acc[m].append(np.nanmean([region_scores(Sg[:, i] >= LGRID[k], T[:, i]) for i in tst], 0)); lam[m].append(LGRID[k])
+    for m in acc:
+        out[m] = (np.mean(acc[m], 0), None, float(np.mean(lam[m])))
+    return out
 
 
-def run_regions(root):
-    data = os.path.join(root, "conformal_eit", "data"); R, _, _ = load_ops(os.path.join(data, "conf_ops_b3cr.mat"))
-    results = {}
-    for L, lv in enumerate(range(4), start=1):
-        fn = os.path.join(data, f"conf_level{lv}.mat")
-        if not os.path.exists(fn):
-            print(f"   (level {lv} not found, skipped)"); continue
-        with h5py.File(fn, "r") as f:
-            Y, T = f["D"]["Y"][()].T, f["D"]["T"][()].T.astype(bool)
-        S = rel_score(R @ Y); n = S.shape[1]; nc = int(round(CAL_FRAC * n))
-        rng = np.random.default_rng(SEED + L)
-        splits = [(p[:nc], p[nc:]) for p in (rng.permutation(n) for _ in range(N_SPLITS))]
-        results[f"sim_level{lv}"] = evaluate(S, T, splits)
-        print(f"   simulated level {lv}: {n} phantoms")
+def run(root, ktc_sigma):
+    data = os.path.join(root, "conformal_eit", "data"); results = {}
+    # ---- simulations, level 3 ----
+    ops = load_ops_full(os.path.join(data, "conf_ops_b3cr.mat")); grid = Grid(ops["C"], ops["dx"])
+    tune = load_set(os.path.join(data, "conf_tune.mat"))
+    G_gn, a_gn, e_gn = tune_linear(ops["J"], "gn", tune["Y"], tune["XT"])
+    G_tk, a_tk, e_tk = tune_linear(ops["J"], "tikhonov", tune["Y"], tune["XT"])
+    print(f"   simulations: Gauss-Newton weight {a_gn:.3g} (tuning error {e_gn:.3f}), Tikhonov weight {a_tk:.3g} ({e_tk:.3f})")
+    lv = 3; L = lv + 1
+    D = load_set(os.path.join(data, f"conf_level{lv}.mat"))
+    Xtv = sio.loadmat(os.path.join(data, f"conf_tv_level{lv}.mat"))["Xt"]
+    n = D["Y"].shape[1]; nc = int(round(CAL_FRAC * n)); rng = np.random.default_rng(SEED + L)
+    splits = [(p[:nc], p[nc:]) for p in (rng.permutation(n) for _ in range(N_SPLITS))]
+    results["sim_level3"] = evaluate({"gn": G_gn @ D["Y"], "tikhonov": G_tk @ D["Y"], "tv": Xtv},
+                                     rel_score(ops["R"] @ D["Y"]), D["T"], grid, splits)
+    print(f"   simulated level 3: {n} phantoms")
+    # ---- real KTC2023 ----
     K = load_ktc(root)
     if K is None:
-        print("   (real data not found, skipped)")
-    else:
-        S = rel_score(K["X"]); n = S.shape[1]
-        splits = [(np.array([i for i in range(n) if i != j]), np.array([j])) for j in range(n)]
-        results["ktc_real"] = evaluate(S, K["T"], splits)
-        print(f"   real KTC2023: {n} phantoms (leave-one-out)")
+        print("   (real data not found, skipped)"); return results
+    opk = load_ops_full(os.path.join(data, "conf_ops_ktc.mat"))
+    ks = load_set(os.path.join(data, "conf_ktc_sim.mat"))
+    Yt, XTt = ks["Y"][:, :60], ks["XT"][:, :60]
+    G_gn, a_gn, e_gn = tune_linear(opk["J"], "gn", Yt, XTt)
+    G_tk, a_tk, e_tk = tune_linear(opk["J"], "tikhonov", Yt, XTt)
+    print(f"   KTC: Gauss-Newton weight {a_gn:.3g} ({e_gn:.3f}), Tikhonov weight {a_tk:.3g} ({e_tk:.3f}); tuning TV ...")
+    mu, e_mu = tune_tv(opk["J"], opk["Dg"], ks["sigma_m"], Yt, XTt)
+    # real voltages -> model units: same out-of-range noise estimate as exp3_ktc_real.m
+    U, sv, _ = np.linalg.svd(opk["J"], full_matrices=False); r = int(np.sum(sv > sv[0] * 1e-8)); U = U[:, :r]
+    Yr = K["Y"]; res = Yr - U @ (U.T @ Yr)
+    sig_raw = float(np.median(np.sqrt(np.sum(res ** 2, 0) / max(Yr.shape[0] - r, 1))))
+    Ym = Yr * (ktc_sigma / sig_raw)
+    print(f"   KTC: TV weight {mu:g} ({e_mu:.3f}); voltage scale {sig_raw / ktc_sigma:.4g}")
+    Xtv = tv_recon(Ym, opk["J"], opk["Dg"], ktc_sigma, mu)
+    n = Ym.shape[1]
+    splits = [(np.array([i for i in range(n) if i != j]), np.array([j])) for j in range(n)]
+    results["ktc_real"] = evaluate({"gn": G_gn @ Ym, "tikhonov": G_tk @ Ym, "tv": Xtv},
+                                   rel_score(K["X"]), K["T"], K["grid"], splits)
+    print(f"   real KTC2023: {n} phantoms (leave-one-out)")
     return results
 
 
-def read_errorbars(root):
-    fn = os.path.join(root, "conformal_eit", "results", "exp2_intervals.csv")
-    want = [("Bayes", "Bayes credible", "Bayesian credible intervals"), ("BAE", "BAE credible", "Bayesian approximation error"),
-            ("GREIT", "CRC grp adaptive", "Conformal (GREIT)")]
-    out = []
-    with open(fn) as f:
-        for r in csv.DictReader(f):
-            if abs(float(r["alpha"]) - ALPHA) > 1e-9:
-                continue
-            for est, meth, label in want:
-                if r["estimate"] == est and r["method"] == meth:
-                    out.append((int(r["level"]), label, float(r["miscov_all"]), float(r["miscov_active"]),
-                                float(r["miscov_background"]), float(r["width_active"])))
-    return sorted(out, key=lambda x: (x[0], [w[2] for w in want].index(x[1])))
-
-
-def write(root, out_dir, regions, ebars):
+def write(results, out_dir):
     os.makedirs(out_dir, exist_ok=True)
+    order = RECON + ["conf_inner", "conf_outer"]
     with open(os.path.join(out_dir, "exp6_comparison_regions.csv"), "w") as f:
-        f.write("dataset,method,mean_threshold," + ",".join(REGION_METRICS) + "\n")
-        for ds, (vals, thr) in regions.items():
-            for m in REGION_METHODS:
-                f.write(f"{ds},{m},{thr[m]:.4f}," + ",".join(f"{v:.6f}" for v in vals[m]) + "\n")
-    with open(os.path.join(out_dir, "exp6_comparison_errorbars.csv"), "w") as f:
-        f.write("level,method,miscov_all,miscov_active,miscov_background,width_active\n")
-        for r in ebars:
-            f.write(f"{r[0]},{r[1]},{r[2]:.6f},{r[3]:.6f},{r[4]:.6f},{r[5]:.6f}\n")
-    lines = []
-    for ds, (vals, thr) in regions.items():
-        print(f"\n{ds}: anomaly regions, alpha = {ALPHA:.2f}")
-        print(f"{'method':24s}{'thr':>6s}" + "".join(f"{k:>12s}" for k in REGION_METRICS))
-        for m in REGION_METHODS:
-            print(f"{REGION_LABEL[m].replace(chr(92), ''):24s}{thr[m]:6.2f}" + "".join(f"{v:12.3f}" for v in vals[m]))
-            lines.append((ds, m, thr[m], vals[m]))
-    print(f"\npixel error bars (simulations), alpha = {ALPHA:.2f}")
-    print(f"{'lvl':4s}{'method':32s}{'miscov all':>12s}{'active':>10s}{'background':>12s}{'width':>8s}")
-    for r in ebars:
-        print(f"{r[0]:<4d}{r[1]:32s}{r[2]:12.3f}{r[3]:10.3f}{r[4]:12.3f}{r[5]:8.2f}")
+        f.write("dataset,method,threshold," + ",".join(REGION_METRICS) + "\n")
+        for ds, r in results.items():
+            for m in order:
+                f.write(f"{ds},{m},{r[m][2]:.4f}," + ",".join(f"{v:.6f}" for v in r[m][0]) + "\n")
+    with open(os.path.join(out_dir, "exp6_comparison_metrics.csv"), "w") as f:
+        f.write("dataset,method," + ",".join(METRICS) + "\n")
+        for ds, r in results.items():
+            for m in RECON:
+                f.write(f"{ds},{m}," + ",".join(f"{v:.6f}" for v in r[m][1]) + "\n")
     with open(os.path.join(out_dir, "exp6_comparison_tables.tex"), "w") as f:
-        for ds in regions:
-            f.write(f"% {ds}\n\\begin{{tabular}}{{lcccccc}}\n\\toprule\n"
-                    "Method & Threshold & Spurious & Missed & Area & Dice & Precision\\\\\n\\midrule\n")
-            for d, m, t, v in lines:
-                if d == ds:
-                    f.write(f"{REGION_LABEL[m]} & {t:.2f} & {v[0]:.3f} & {v[1]:.3f} & {v[2]:.2f} & {v[3]:.3f} & {v[6]:.3f}\\\\\n")
-            f.write("\\bottomrule\n\\end{tabular}\n\n")
+        for ds, r in results.items():
+            f.write(f"% {ds}\n")
+            for m in order:
+                v = r[m][0]
+                f.write(f"{LABEL[m]} & {r[m][2]:.2f} & {v[0]:.3f} & {v[1]:.3f} & {v[2]:.2f} & {v[3]:.3f} & {v[6]:.3f}\\\\\n")
+            f.write("\n")
+    for ds, r in results.items():
+        print(f"\n{ds}: anomaly regions, alpha = {ALPHA:.2f}")
+        print(f"{'method':30s}{'thr':>6s}" + "".join(f"{k:>12s}" for k in REGION_METRICS))
+        for m in order:
+            print(f"{LABEL[m].replace(chr(92), '').replace('--', '-'):30s}{r[m][2]:6.2f}" + "".join(f"{v:12.3f}" for v in r[m][0]))
+        print(f"{'segmentation metrics':30s}" + "".join(f"{k[:10]:>11s}" for k in METRICS))
+        for m in RECON:
+            print(f"{m:30s}" + "".join(f"{v:11.3f}" for v in r[m][1]))
 
 
 if __name__ == "__main__":
@@ -164,7 +211,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=os.path.abspath(os.path.join(here, "..", "..")))
     ap.add_argument("--out", default=None)
+    ap.add_argument("--ktc_sigma", type=float, default=0.0152,
+                    help="real-data noise std in model units, as printed by exp3_ktc_real.m")
     a = ap.parse_args()
-    print("> Experiment 6: comparison with established methods")
-    reg = run_regions(a.root); eb = read_errorbars(a.root)
-    write(a.root, a.out or os.path.join(a.root, "conformal_eit", "results"), reg, eb)
+    print("> Experiment 6: comparison with Gauss-Newton, Tikhonov and TV")
+    write(run(a.root, a.ktc_sigma), a.out or os.path.join(a.root, "conformal_eit", "results"))

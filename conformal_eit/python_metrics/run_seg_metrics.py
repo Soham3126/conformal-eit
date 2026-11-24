@@ -146,7 +146,8 @@ def load_ktc(root):
         if t.any():                                   # drops the water-only phantom
             Ys.append(u - uref); Ts.append(t); names.append(f"data{num}")
     X = R @ np.array(Ys).T                            # GREIT images; the voltage scale cancels in the relative score
-    return {"X": X, "T": np.array(Ts).T, "names": names, "grid": Grid(C, dx), "angle": ang, "mirror": flip}
+    return {"X": X, "Y": np.array(Ys).T, "T": np.array(Ts).T, "names": names, "grid": Grid(C, dx),
+            "angle": ang, "mirror": flip}
 
 
 def run_real(root, rows):
