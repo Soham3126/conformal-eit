@@ -13,7 +13,7 @@ SERIES = [("Bayes", "Bayes credible", "Bayes credible"), ("BAE", "BAE credible",
           ("Bayes", "CRC grp adaptive", "Bayes + conformal"), ("BAE", "CRC grp adaptive", "BAE + conformal"),
           ("GREIT", "CRC grp adaptive", "GREIT + conformal"), ("TV", "CRC grp adaptive", "TV + conformal")]
 COLORS = ["#0072BD", "#D95319", "#EDB120", "#7E2F8E", "#77AC30", "#4DBEEE"]
-PANELS = [("miscov_active", "miscoverage, active pixels", "center"),
+PANELS = [("miscov_active", "miscoverage, active pixels", "upper right"),
           ("width_active", "interval width, active pixels", "upper right"),
           ("miscov_true_anomaly", "miscoverage, true anomaly (not guaranteed)", "center right")]
 
@@ -53,7 +53,9 @@ if __name__ == "__main__":
         for sp in ("top", "right"):
             ax.spines[sp].set_visible(False)
         ax.tick_params(direction="in", length=3)
-        ax.legend(loc=loc, fontsize=7.5, framealpha=1, edgecolor="k", fancybox=False).get_frame().set_linewidth(0.6)
+        # first panel: legend in the empty area at lower right, so it hides no curve
+        anchor = dict(bbox_to_anchor=(1.0, 0.62)) if p == 0 else {}
+        ax.legend(loc=loc, fontsize=7.5, framealpha=1, edgecolor="k", fancybox=False, **anchor).get_frame().set_linewidth(0.6)
     fig.tight_layout(w_pad=3)
     fig.savefig(out, dpi=200, facecolor="w")
     print(f"> Saved {out}")
